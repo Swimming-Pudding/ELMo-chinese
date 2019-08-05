@@ -1,0 +1,27 @@
+input: 若干句子组成的文档，一行为一句
+process:
+	1. 将各句进行分词，词长不超过4（jieba）；
+	2. 在句首句尾加入<S>和</S>，这样每句就变成：['<S>','word_1','word_2'...,'</S>']
+	3. 对每句的每个词进行20维的扩展，如：<S>可写为:[<w>,<S>,<\w>,<PAD>,<PAD>,...],
+		将这个list的每一项进行UTF-8映射（词拆成字，字进行映射，中文一个字可能映射成多位），这样得到20维的扩展
+	4. 另每句句长为20（有20个词），batch_size = 128，则现在得到了[128,20,20]的矩阵。
+		这个矩阵是utf-8编码的矩阵（0-255的UTF-8自带字符集以及256,257...等用于表示<S>,</S>,<w>,<\w>的字符集）
+	5. 令以上每个字符拥有16维的embedding，所以每个batch的维度为[128,20,20,16]
+	
+	6. CNN：filters分别为32个[1,16],32个[2,16],64个[3,16]等共2048个，
+		每一个filter做完CNN后做max_pooling和activation，所有filters做完后concat，得到[128,20,1,2048],squeeze得到[128,20,2048],reshape得到[2560,2048]
+	7. highway两个：x为[2560,2048], carry_gate = [2560,2048]*[2048,2048], transform_gate = [2560,2048]*[2048,2048], 
+		得到carry_gate*transform_gate+(1-carry_gate)*x（此式中矩阵相乘都是点乘）。将两个highway和x放在一个list里（都reshape成[128,20,2048]）
+	8. 经过两次highway后的embedding[2560,2048]做linear projection得到[2560,100]，reshape得到[128,20,100]
+	9. reverse的CNN、highway和projection参数和forward一致，得到LSTM_inputs[[128,20,100],[128,20,100]]
+	
+	10. LSTM:两层，还有skip connection和dropout，
+		unit_size:4096（h(t)是[4096,128],128是batch_size），在每一时刻，x(t)和h(t-1)concat得到[4196,128]，
+			之后和各个门的weight[4096,4196]进行矩阵乘法，得到[4096,128]，再进行之后的运算，然后再把output project到100维进入下一层，
+		再加skip connection和dropout
+	11. 所有hidden state先初始化为0，做forward propagation，得到20个（20是句长）[100,128]，把这20个stack，再reshape得到[2560,100]，再dropout一下
+	12. target:next token，loss:sampled softmax loss，再reduce_mean
+	13. total_loss:bidirectional的loss求平均
+	14. AdagradOptimizer，求gradients,做一些clipping等处理，然后apply_gradients
+	
+	15. 可以几个GPU一起run，run若干epoch
